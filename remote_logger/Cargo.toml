@@ -4,8 +4,10 @@ version = "0.1.0"
 edition = "2018"
 
 [features]
-default = ["chrono"]
+default = ["chrono", "thiserror"]
+len-u128 = []
 
 [dependencies]
-log = { version = "0.4.14", features = ["std"] }
 chrono = { version = "0.4.19", optional = true }
+log = { version = "0.4.14", features = ["std"] }
+thiserror = { version = "1.0.26", optional = true }
