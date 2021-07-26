@@ -15,6 +15,13 @@
 //! to each log message
 //! - **thiserror** (*default*): enables the [`thiserror`] dependency, which makes the error types implement [`Error`](std::error::Error)
 //! - **len-u128**: sends lengths as `u128` instead of `u64`
+//!
+//! ## remote_monitor
+//! The messages from this crate have to be received by something.
+//!
+//! The `remote_monitor` crate contains a listener that implements the same protocol
+//! used by this crate, so you probably want to use the binary from that crate
+//! in a separate window to receive you log messages.
 
 use std::io::Write;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream};
