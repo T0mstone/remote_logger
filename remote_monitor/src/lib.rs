@@ -6,6 +6,7 @@ use std::sync::mpsc::{Receiver, SendError, TryRecvError};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
+#[cfg(feature = "thiserror")]
 use thiserror::Error;
 
 #[cfg(not(feature = "len-u128"))]
@@ -27,21 +28,35 @@ pub struct RemoteMonitor {
 	buf: Vec<u8>,
 }
 
-#[derive(Debug, Error)]
+#[derive(Debug)]
+#[cfg_attr(feature = "thiserror", derive(Error))]
 pub enum UpdateStreamsError {
-	#[error("failed to set timeout for receiver from addr {0}: {1}")]
+	#[cfg_attr(
+		feature = "thiserror",
+		error("failed to set timeout for receiver from addr {0}: {1}")
+	)]
 	SetTimeout(SocketAddr, io::Error),
-	#[error("The connection accepting thread exited early")]
+	#[cfg_attr(
+		feature = "thiserror",
+		error("The connection accepting thread exited early")
+	)]
 	Disconnected,
 }
 
-#[derive(Debug, Error)]
+#[derive(Debug)]
+#[cfg_attr(feature = "thiserror", derive(Error))]
 pub enum ReadFromStreamError {
-	#[error("failed to peek at addr {0}: {1}")]
+	#[cfg_attr(feature = "thiserror", error("failed to peek at addr {0}: {1}"))]
 	Peek(SocketAddr, io::Error),
-	#[error("failed to read message length from addr {0}: {1}")]
+	#[cfg_attr(
+		feature = "thiserror",
+		error("failed to read message length from addr {0}: {1}")
+	)]
 	ReadLength(SocketAddr, io::Error),
-	#[error("failed to read message from addr {0}: {1}")]
+	#[cfg_attr(
+		feature = "thiserror",
+		error("failed to read message from addr {0}: {1}")
+	)]
 	ReadMessage(SocketAddr, io::Error),
 }
 
