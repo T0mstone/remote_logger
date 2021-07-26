@@ -3,4 +3,8 @@ name = "remote_monitor"
 version = "0.1.0"
 edition = "2018"
 
+[features]
+len-u128 = []
+
 [dependencies]
+thiserror = "1.0.26"
