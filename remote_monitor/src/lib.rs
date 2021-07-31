@@ -155,7 +155,7 @@ impl RemoteMonitor {
 					let metadata = {
 						let name = (!header.name.is_empty()).then(|| header.name);
 						let name_unique =
-							name.is_some() && self.streams.values().any(|t| t.1.name == name);
+							name.is_some() && self.streams.values().all(|t| t.1.name != name);
 
 						ConnectionMetadata {
 							addr,
