@@ -5,7 +5,16 @@ edition = "2018"
 
 [features]
 default = ["thiserror"]
-len-u128 = []
+len-u128 = ["remote_logger_protocol/len-u128"]
+thiserror = ["remote_logger_protocol/thiserror", "dep-thiserror"]
 
 [dependencies]
-thiserror = { version = "1.0.26", optional = true }
+slotmap = "1.0.5"
+
+[dependencies.dep-thiserror]
+package = "thiserror"
+version = "1.0.26"
+optional = true
+
+[dependencies.remote_logger_protocol]
+path = "../remote_logger_protocol"

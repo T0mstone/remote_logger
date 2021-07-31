@@ -1,0 +1,11 @@
+[package]
+name = "remote_logger_protocol"
+version = "0.1.0"
+edition = "2018"
+
+[features]
+default = ["thiserror"]
+len-u128 = []
+
+[dependencies]
+thiserror = { version = "1.0.26", optional = true }

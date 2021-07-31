@@ -1,5 +1,6 @@
 [workspace]
 members = [
 	"remote_logger",
+	"remote_logger_protocol",
 	"remote_monitor"
 ]

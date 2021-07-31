@@ -7,8 +7,7 @@
 //! The original use-case this library is made for
 //! are TUI applications, which can't use stdout to log.
 //!
-//! The specific implementation sends a message by first sending
-//! its length (as big-endian) over the connection, followed by the message itself.
+//! See [`remote_logger_protocol`] for info about the protocol used.
 //!
 //! ## Crate features
 //! - **chrono** (*default*): enables the [`chrono`] dependency, which is used to prepend the current datetime (to millisecond precision)
@@ -22,19 +21,25 @@
 //! The `remote_monitor` crate contains a listener that implements the same protocol
 //! used by this crate, so you probably want to use the binary from that crate
 //! in a separate window to receive you log messages.
+//!
+//! [`chrono`]: https://docs.rs/chrono/latest
+//! [`thiserror`]: https://docs.rs/thiserror/latest
 
 use std::io::Write;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream};
 use std::sync::Mutex;
 
+#[cfg(feature = "thiserror")]
+use dep_thiserror as thiserror;
 use log::{LevelFilter, Log, Metadata, Record};
+use remote_logger_protocol::{Header, HeaderMessagePart, MessageError, MessageStream};
 #[cfg(feature = "thiserror")]
 use thiserror::Error;
 
 // note: some of this code is taken from https://github.com/borntyping/rust-simple_logger
 
 struct RemoteLoggerFinished {
-	streams: Mutex<Vec<TcpStream>>,
+	streams: Mutex<Vec<MessageStream>>,
 	default_level: LevelFilter,
 	module_levels: Vec<(String, LevelFilter)>,
 	fail_strat: LogFailureStrategy,
@@ -52,6 +57,7 @@ pub enum LogFailureStrategy {
 
 /// The main logger type of this crate
 pub struct RemoteLogger {
+	name: Option<String>,
 	output_addrs: Vec<SocketAddr>,
 	default_level: LevelFilter,
 	module_levels: Vec<(String, LevelFilter)>,
@@ -61,8 +67,17 @@ pub struct RemoteLogger {
 /// An error trying to connect to an output address
 #[derive(Debug)]
 #[cfg_attr(feature = "thiserror", derive(Error))]
-#[cfg_attr(feature = "thiserror", error("failed to connect to address {0}: {1}"))]
-pub struct ConnectError(pub SocketAddr, pub std::io::Error);
+pub enum ConnectError {
+	/// The socket connection itself failed
+	#[cfg_attr(feature = "thiserror", error("failed to connect to address {0}: {1}"))]
+	Connect(SocketAddr, std::io::Error),
+	/// The initial header could not be sent
+	#[cfg_attr(
+		feature = "thiserror",
+		error("failed to send header to address {0}: {1}")
+	)]
+	SendHeader(SocketAddr, HeaderMessagePart, std::io::Error),
+}
 
 /// An error while trying to initialize the [`RemoteLogger`]
 #[derive(Debug)]
@@ -95,11 +110,22 @@ impl RemoteLogger {
 	/// For a logger already set up to output to localhost on port `50033`, use [`Self::default`]
 	pub fn new() -> Self {
 		RemoteLogger {
+			name: None,
 			output_addrs: Vec::new(),
 			default_level: LevelFilter::max(),
 			module_levels: Vec::new(),
 			fail_strat: LogFailureStrategy::Panic,
 		}
+	}
+
+	/// Set the name the logger will identify itself with
+	///
+	/// The logger may have a name, which is transmitted over the connection
+	/// before the logging begins.
+	pub fn with_name(mut self, name: String) -> Self {
+		assert!(!name.is_empty(), "setting an empty name is not allowed");
+		self.name = Some(name);
+		self
 	}
 
 	/// Add an address to the list of output addresses
@@ -173,6 +199,12 @@ impl RemoteLogger {
 		Ok(max_level)
 	}
 
+	fn header(&self) -> Header {
+		Header {
+			name: self.name.clone().unwrap_or_default(),
+		}
+	}
+
 	/// Register the logger with the [`log`] crate.
 	/// This must be called in order for [`log`] functions/macros to use this logger
 	///
@@ -182,16 +214,27 @@ impl RemoteLogger {
 	pub fn init(mut self) -> Result<Vec<ConnectError>, InitLoggerError> {
 		let max_level = self.prepare_init()?;
 
+		let header = self.header();
+
 		let mut errs = Vec::new();
+		let mut errs2 = Vec::new();
 		let streams = self
 			.output_addrs
 			.into_iter()
 			.filter_map(|addr| {
 				TcpStream::connect(addr)
-					.map_err(|e| errs.push(ConnectError(addr, e)))
+					.map(|s| (addr, s))
+					.map_err(|e| errs.push(ConnectError::Connect(addr, e)))
+					.ok()
+			})
+			.filter_map(|(addr, stream)| {
+				MessageStream::init_send(stream, header.clone())
+					.map_err(|e| errs2.push(ConnectError::SendHeader(addr, e.0, e.1)))
 					.ok()
 			})
 			.collect::<Vec<_>>();
+
+		errs.append(&mut errs2);
 
 		if streams.is_empty() {
 			return Err(InitLoggerError::Connect(errs));
@@ -252,16 +295,8 @@ impl Log for RemoteLoggerFinished {
 	}
 
 	fn log(&self, record: &Record) {
-		let msg = format_message(record);
-		let msg = msg.as_bytes();
-		let len_bytes = {
-			#[cfg(not(feature = "len-u128"))]
-			let len = msg.len() as u64;
-			#[cfg(feature = "len-u128")]
-			let len = msg.len() as u128;
-
-			len.to_be_bytes()
-		};
+		let msg = format_message(record).into_bytes();
+		let msg = &msg;
 
 		let mut streams = match self.streams.lock() {
 			Ok(x) => x,
@@ -272,28 +307,15 @@ impl Log for RemoteLoggerFinished {
 		};
 
 		for stream in streams.iter_mut() {
-			if let Err(e) = stream.write_all(&len_bytes) {
+			if let Err(MessageError(part, e)) = stream.write_message(msg) {
 				match self.fail_strat {
 					LogFailureStrategy::Ignore => (),
-					LogFailureStrategy::Panic => match stream.peer_addr() {
+					LogFailureStrategy::Panic => match stream.inner().peer_addr() {
 						Ok(addr) => {
-							panic!("failed to write length of message to {}: {}", addr, e);
+							panic!("failed to write message {} to {}: {}", part, addr, e);
 						}
 						Err(_) => {
-							panic!("failed to write length of message to a stream: {}", e);
-						}
-					},
-				}
-			}
-			if let Err(e) = stream.write_all(msg) {
-				match self.fail_strat {
-					LogFailureStrategy::Ignore => (),
-					LogFailureStrategy::Panic => match stream.peer_addr() {
-						Ok(addr) => {
-							panic!("failed to write message to {}: {}", addr, e);
-						}
-						Err(_) => {
-							panic!("failed to write message to a stream: {}", e);
+							panic!("failed to write message {} to a stream: {}", part, e);
 						}
 					},
 				}
@@ -302,6 +324,21 @@ impl Log for RemoteLoggerFinished {
 	}
 
 	fn flush(&self) {
-		// messages are sent immediately, so flush can't do anything
+		let mut streams = match self.streams.lock() {
+			Ok(x) => x,
+			Err(e) => match self.fail_strat {
+				LogFailureStrategy::Ignore => return,
+				LogFailureStrategy::Panic => panic!("failed to obtain lock for streams: {}", e),
+			},
+		};
+
+		for stream in streams.iter_mut() {
+			if let Err(e) = stream.inner_mut().flush() {
+				match self.fail_strat {
+					LogFailureStrategy::Ignore => continue,
+					LogFailureStrategy::Panic => panic!("failed to flush a stream: {}", e),
+				}
+			}
+		}
 	}
 }

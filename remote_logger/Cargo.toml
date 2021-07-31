@@ -5,9 +5,17 @@ edition = "2018"
 
 [features]
 default = ["chrono", "thiserror"]
-len-u128 = []
+len-u128 = ["remote_logger_protocol/len-u128"]
+thiserror = ["remote_logger_protocol/thiserror", "dep-thiserror"]
 
 [dependencies]
 chrono = { version = "0.4.19", optional = true }
 log = { version = "0.4.14", features = ["std"] }
-thiserror = { version = "1.0.26", optional = true }
+
+[dependencies.dep-thiserror]
+package = "thiserror"
+version = "1.0.26"
+optional = true
+
+[dependencies.remote_logger_protocol]
+path = "../remote_logger_protocol"

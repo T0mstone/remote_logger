@@ -1,31 +1,52 @@
-use std::collections::{HashSet, VecDeque};
+use std::collections::VecDeque;
 use std::io;
-use std::io::Read;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::sync::mpsc::{Receiver, SendError, TryRecvError};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
 #[cfg(feature = "thiserror")]
+use dep_thiserror as thiserror;
+use remote_logger_protocol::{
+	HeaderMessagePart, MessageError, MessagePart, MessageStream, TryReceiveMessageError,
+};
+use slotmap::{new_key_type, DenseSlotMap};
+#[cfg(feature = "thiserror")]
 use thiserror::Error;
-
-#[cfg(not(feature = "len-u128"))]
-type LengthType = u64;
-#[cfg(feature = "len-u128")]
-type LengthType = u128;
-
-const LEN_LEN: usize = std::mem::size_of::<LengthType>();
 
 // todo: docs
 
+new_key_type! {
+	pub struct ConnectionId;
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct ConnectionMetadata {
+	pub addr: SocketAddr,
+	pub name: Option<String>,
+	pub name_unique: bool,
+}
+
+impl ConnectionMetadata {
+	pub fn unique_string(&self) -> String {
+		let is_localhost = self.addr.ip() == IpAddr::V4(Ipv4Addr::LOCALHOST);
+
+		match self.name.clone() {
+			Some(name) if self.name_unique => format!("~{}", name),
+			Some(name) if is_localhost => format!(":{}~{}", self.addr.port(), name),
+			Some(name) => format!("{}~{}", self.addr, name),
+			None if is_localhost => format!(":{}", self.addr.port()),
+			None => self.addr.to_string(),
+		}
+	}
+}
+
 pub struct RemoteMonitor {
-	streams: Vec<(TcpStream, SocketAddr)>,
-	closed_streams: Vec<SocketAddr>,
-	message_queue: VecDeque<(SocketAddr, String)>,
+	streams: DenseSlotMap<ConnectionId, (MessageStream, ConnectionMetadata)>,
+	closed_streams: Vec<ConnectionMetadata>,
+	message_queue: VecDeque<(ConnectionId, String)>,
 	conn_rec: Receiver<(TcpStream, SocketAddr)>,
 	_jh: JoinHandle<()>,
-	size_buf: [u8; LEN_LEN],
-	buf: Vec<u8>,
 }
 
 #[derive(Debug)]
@@ -38,6 +59,11 @@ pub enum UpdateStreamsError {
 	SetTimeout(SocketAddr, io::Error),
 	#[cfg_attr(
 		feature = "thiserror",
+		error("failed to receive header for receiver from addr {0}: {1}")
+	)]
+	ReceiveHeader(SocketAddr, MessageError<HeaderMessagePart>),
+	#[cfg_attr(
+		feature = "thiserror",
 		error("The connection accepting thread exited early")
 	)]
 	Disconnected,
@@ -46,18 +72,10 @@ pub enum UpdateStreamsError {
 #[derive(Debug)]
 #[cfg_attr(feature = "thiserror", derive(Error))]
 pub enum ReadFromStreamError {
-	#[cfg_attr(feature = "thiserror", error("failed to peek at addr {0}: {1}"))]
-	Peek(SocketAddr, io::Error),
-	#[cfg_attr(
-		feature = "thiserror",
-		error("failed to read message length from addr {0}: {1}")
-	)]
-	ReadLength(SocketAddr, io::Error),
-	#[cfg_attr(
-		feature = "thiserror",
-		error("failed to read message from addr {0}: {1}")
-	)]
-	ReadMessage(SocketAddr, io::Error),
+	#[cfg_attr(feature = "thiserror", error("failed to peek: {1}"))]
+	Peek(ConnectionId, io::Error),
+	#[cfg_attr(feature = "thiserror", error("{1}"))]
+	Receive(ConnectionId, MessageError<MessagePart>),
 }
 
 impl RemoteMonitor {
@@ -69,7 +87,7 @@ impl RemoteMonitor {
 			if let Ok(tup) = listener.accept() {
 				let res = sen.send(tup);
 
-				if let Err(SendError { .. }) = res {
+				if let Err(SendError(_)) = res {
 					// receiver closed, so we can stop this thread
 					break;
 				}
@@ -77,13 +95,11 @@ impl RemoteMonitor {
 		});
 
 		Ok(Self {
-			streams: Vec::new(),
+			streams: DenseSlotMap::with_key(),
 			closed_streams: Vec::new(),
 			message_queue: VecDeque::new(),
 			conn_rec,
 			_jh,
-			size_buf: [0; LEN_LEN],
-			buf: Vec::new(),
 		})
 	}
 
@@ -92,16 +108,33 @@ impl RemoteMonitor {
 	}
 
 	// todo: docs (mention the maybe unintuitive error behaviour)
-	pub fn receive_connections(&mut self) -> Result<Vec<SocketAddr>, UpdateStreamsError> {
+	pub fn receive_connections(&mut self) -> Result<Vec<ConnectionMetadata>, UpdateStreamsError> {
 		let mut res = vec![];
 		loop {
 			match self.conn_rec.try_recv() {
-				Ok(tup) => {
-					tup.0
+				Ok((stream, addr)) => {
+					stream
 						.set_read_timeout(Some(Duration::from_millis(2)))
-						.map_err(|e| UpdateStreamsError::SetTimeout(tup.1, e))?;
-					res.push(tup.1);
-					self.streams.push(tup);
+						.map_err(|e| UpdateStreamsError::SetTimeout(addr, e))?;
+
+					let (stream, header) = MessageStream::init_receive(stream)
+						.map_err(|e| UpdateStreamsError::ReceiveHeader(addr, e))?;
+
+					let metadata = {
+						let name = (!header.name.is_empty()).then(|| header.name);
+						let name_unique =
+							name.is_some() && self.streams.values().any(|t| t.1.name == name);
+
+						ConnectionMetadata {
+							addr,
+							name,
+							name_unique,
+						}
+					};
+
+					res.push(metadata.clone());
+
+					self.streams.insert((stream, metadata));
 				}
 				Err(TryRecvError::Empty) => break,
 				Err(TryRecvError::Disconnected) => {
@@ -116,53 +149,54 @@ impl RemoteMonitor {
 		Ok(res)
 	}
 
-	pub fn closed_connections(&mut self) -> Vec<SocketAddr> {
+	pub fn closed_connections(&mut self) -> Vec<ConnectionMetadata> {
 		std::mem::take(&mut self.closed_streams)
 	}
 
 	fn message_tick(&mut self) -> Result<(), ReadFromStreamError> {
-		let mut closed_streams = HashSet::new();
+		let mut closed_stream_idxs = Vec::new();
+		let mut closed_streams = Vec::new();
 
-		for (stream, addr) in self.streams.iter_mut() {
-			let n_peek = match stream.peek(&mut [0]) {
-				Ok(x) => x,
-				Err(e) => match e.kind() {
-					// these indicate that no data is currently available
-					// (the error is stated in https://doc.rust-lang.org/std/net/struct.TcpStream.html#method.set_read_timeout
-					// as being platform-specific so it may be possible that a platform will return a different error kind
-					// on timeout. In that case, this code will have to be updated to include the different error kind)
-					io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock => continue,
-					_ => return Err(ReadFromStreamError::Peek(*addr, e)),
-				},
-			};
-			if n_peek == 0 {
-				closed_streams.insert(*addr);
-				continue;
+		for (id, (stream, _)) in self.streams.iter_mut() {
+			match stream.try_receive_message::<Vec<u8>>() {
+				Ok(None) => (),
+				Ok(Some(vec)) => {
+					let s = String::from_utf8_lossy(&vec);
+					self.message_queue.push_back((id, s.to_string()));
+				}
+				Err(TryReceiveMessageError::Closed) => {
+					closed_stream_idxs.push(id);
+					continue;
+				}
+				Err(TryReceiveMessageError::Peek(e)) => {
+					return Err(ReadFromStreamError::Peek(id, e))
+				}
+				Err(TryReceiveMessageError::Receive(err)) => {
+					return Err(ReadFromStreamError::Receive(id, err));
+				}
 			}
-
-			stream
-				.read_exact(&mut self.size_buf)
-				.map_err(|e| ReadFromStreamError::ReadLength(*addr, e))?;
-			let length = LengthType::from_be_bytes(self.size_buf) as usize;
-
-			self.buf = vec![0; length];
-			stream
-				.read_exact(&mut self.buf)
-				.map_err(|e| ReadFromStreamError::ReadMessage(*addr, e))?;
-
-			let s = String::from_utf8_lossy(&self.buf);
-
-			self.message_queue.push_back((*addr, s.to_string()));
 		}
 
-		self.streams
-			.retain(|(_, addr)| !closed_streams.contains(addr));
+		// sort from high to low to avoid index shifts when removing
+		closed_stream_idxs.sort_by(|l, r| l.cmp(r).reverse());
+
+		for id in closed_stream_idxs.clone() {
+			// since the id was obtained just above, we can be sure that the corresponding value is still in the map,
+			// so unwrapping here is ok
+			let (_, meta) = self.streams.remove(id).unwrap();
+			closed_streams.push(meta);
+		}
+
 		self.closed_streams.extend(closed_streams);
 
 		Ok(())
 	}
 
-	pub fn next_message(&mut self) -> Result<Option<(SocketAddr, String)>, ReadFromStreamError> {
+	pub fn connection_info(&self, id: ConnectionId) -> &ConnectionMetadata {
+		&self.streams[id].1
+	}
+
+	pub fn next_message(&mut self) -> Result<Option<(ConnectionId, String)>, ReadFromStreamError> {
 		if self.message_queue.is_empty() {
 			self.message_tick()?;
 		}

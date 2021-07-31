@@ -1,5 +1,3 @@
-use std::net::{IpAddr, Ipv4Addr};
-
 use remote_monitor::RemoteMonitor;
 
 // todo: error handling, config, and docs
@@ -8,24 +6,22 @@ fn main() {
 
 	loop {
 		let opened = monitor.receive_connections().unwrap();
-		for addr in opened {
-			println!("new connection from {}", addr);
+		for meta in opened {
+			println!("new connection from {}", meta.unique_string());
 		}
 
 		let closed = monitor.closed_connections();
-		for addr in closed {
-			println!("connection from {} was closed", addr);
+		for meta in closed {
+			println!("connection from {} was closed", meta.unique_string());
 		}
 
 		let one = monitor.num_connections() == 1;
 
-		while let Some((addr, s)) = monitor.next_message().unwrap() {
+		while let Some((id, s)) = monitor.next_message().unwrap() {
 			let prefix = if one {
 				String::new()
-			} else if addr.ip() == IpAddr::V4(Ipv4Addr::LOCALHOST) {
-				format!(":{}", addr.port())
 			} else {
-				format!("{}", addr)
+				monitor.connection_info(id).unique_string()
 			};
 
 			println!("{}> {}", prefix, s);

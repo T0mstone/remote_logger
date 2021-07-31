@@ -85,6 +85,14 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "log",
+ "remote_logger_protocol",
+ "thiserror",
+]
+
+[[package]]
+name = "remote_logger_protocol"
+version = "0.1.0"
+dependencies = [
  "thiserror",
 ]
 
@@ -92,7 +100,18 @@ dependencies = [
 name = "remote_monitor"
 version = "0.1.0"
 dependencies = [
+ "remote_logger_protocol",
+ "slotmap",
  "thiserror",
+]
+
+[[package]]
+name = "slotmap"
+version = "1.0.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a952280edbecfb1d4bd3cf2dbc309dc6ab523e53487c438ae21a6df09fe84bc4"
+dependencies = [
+ "version_check",
 ]
 
 [[package]]
@@ -142,6 +161,12 @@ name = "unicode-xid"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ccb82d61f80a663efe1f787a51b16b5a51e3314d6ac365b08639f52387b33f3"
+
+[[package]]
+name = "version_check"
+version = "0.9.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5fecdca9a5291cc2b8dcf7dc02453fee791a280f3743cb0905f8822ae463b3fe"
 
 [[package]]
 name = "wasi"
