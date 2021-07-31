@@ -6,7 +6,8 @@ fn main() {
 
 	loop {
 		let opened = monitor.receive_connections().unwrap();
-		for meta in opened {
+		for id in opened {
+			let meta = monitor.connection_info(id);
 			println!("new connection from {}", meta.unique_string());
 		}
 
